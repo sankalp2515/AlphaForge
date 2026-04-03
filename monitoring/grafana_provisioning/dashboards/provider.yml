@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: AlphaForge
+    folder: AlphaForge
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards

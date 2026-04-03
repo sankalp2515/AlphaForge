@@ -1,0 +1,220 @@
+version: "3.9"
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.8.0-python3.11
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    PYTHONPATH: /opt/airflow
+    ALPHAFORGE_DB_URL: postgresql://alphaforge:alphaforge@timescaledb:5432/alphaforge
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    REDIS_URL: redis://redis:6379/0
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./src:/opt/airflow/src
+    - airflow-logs:/opt/airflow/logs
+  depends_on:
+    postgres-airflow:
+      condition: service_healthy
+  networks:
+    - alphaforge-net
+
+services:
+  # ─── TimescaleDB (Market Data Store) ───
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: alphaforge-timescaledb
+    environment:
+      POSTGRES_USER: alphaforge
+      POSTGRES_PASSWORD: alphaforge
+      POSTGRES_DB: alphaforge
+    ports:
+      - "5433:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alphaforge"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - alphaforge-net
+
+  # ─── Redis (Signal Cache) ───
+  redis:
+    image: redis:7-alpine
+    container_name: alphaforge-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - alphaforge-net
+
+  # ─── MLflow Tracking Server ───
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.9.2
+    container_name: alphaforge-mlflow
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://alphaforge:alphaforge@timescaledb:5432/mlflow
+      --default-artifact-root /mlflow/artifacts
+    environment:
+      MLFLOW_TRACKING_URI: http://0.0.0.0:5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-artifacts:/mlflow/artifacts
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - alphaforge-net
+
+  # ─── Airflow Postgres ───
+  postgres-airflow:
+    image: postgres:15-alpine
+    container_name: alphaforge-postgres-airflow
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - alphaforge-net
+
+  # ─── Airflow Init ───
+  airflow-init:
+    <<: *airflow-common
+    container_name: alphaforge-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create --username admin --password admin \
+          --firstname Admin --lastname User \
+          --role Admin --email admin@alphaforge.io
+    restart: on-failure
+    networks:
+      - alphaforge-net
+
+  # ─── Airflow Webserver ───
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: alphaforge-airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  # ─── Airflow Scheduler ───
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: alphaforge-airflow-scheduler
+    command: scheduler
+    restart: always
+
+  # ─── Signal API ───
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: alphaforge-api
+    ports:
+      - "8000:8000"
+    environment:
+      ALPHAFORGE_DB_URL: postgresql://alphaforge:alphaforge@timescaledb:5432/alphaforge
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: production
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - alphaforge-net
+
+  # ─── Prometheus ───
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: alphaforge-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+    networks:
+      - alphaforge-net
+
+  # ─── Grafana ───
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: alphaforge-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: alphaforge
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana_provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    networks:
+      - alphaforge-net
+
+  # ─── Loki (Log Aggregation) ───
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: alphaforge-loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki-data:/loki
+    networks:
+      - alphaforge-net
+
+volumes:
+  timescale-data:
+  redis-data:
+  mlflow-artifacts:
+  airflow-logs:
+  airflow-db-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+
+networks:
+  alphaforge-net:
+    driver: bridge

@@ -1,0 +1,58 @@
+groups:
+  - name: alphaforge_alerts
+    rules:
+
+      # ─── API Latency ───────────────────────────────────────────────────────
+      - alert: HighPredictionLatency
+        expr: histogram_quantile(0.99, rate(alphaforge_predict_latency_seconds_bucket[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High prediction latency (P99 > 200ms)"
+          description: "P99 latency is {{ $value | humanizeDuration }} for {{ $labels.asset }}"
+
+      # ─── Model Drift ───────────────────────────────────────────────────────
+      - alert: SignalDistributionAnomaly
+        expr: |
+          stddev_over_time(alphaforge_prob_up[1h]) > 0.3
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unusual signal volatility detected"
+          description: "Signal std dev > 0.3 for {{ $labels.asset }} over 1h"
+
+      # ─── Error Rate ────────────────────────────────────────────────────────
+      - alert: HighPredictionErrorRate
+        expr: |
+          rate(alphaforge_predict_requests_total{status="error"}[5m]) /
+          rate(alphaforge_predict_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High prediction error rate (>5%)"
+          description: "Error rate is {{ $value | humanizePercentage }}"
+
+      # ─── API Down ──────────────────────────────────────────────────────────
+      - alert: AlphaForgeAPIDown
+        expr: up{job="alphaforge-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AlphaForge API is down"
+          description: "The Signal API has been unreachable for 2 minutes"
+
+      # ─── Cache Miss Rate ───────────────────────────────────────────────────
+      - alert: HighCacheMissRate
+        expr: |
+          rate(alphaforge_cache_misses_total[10m]) /
+          (rate(alphaforge_cache_hits_total[10m]) + rate(alphaforge_cache_misses_total[10m])) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High cache miss rate (>80%)"
+          description: "Redis cache is not being utilized effectively"

@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install poetry==1.7.1
+
+COPY pyproject.toml poetry.lock* ./
+
+RUN poetry config virtualenvs.create false \
+    && poetry install --only main --no-interaction --no-ansi
+
+COPY src/ ./src/
+
+RUN useradd -m -u 1000 trainer && chown -R trainer:trainer /app
+USER trainer
+
+CMD ["python", "-m", "src.training.trainer", "--model", "lstm"]

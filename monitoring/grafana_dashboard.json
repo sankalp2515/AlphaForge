@@ -1,0 +1,76 @@
+{
+  "title": "AlphaForge — Signal Engine",
+  "uid": "alphaforge-main",
+  "schemaVersion": 38,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Prediction Requests / sec",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{
+        "expr": "rate(alphaforge_predict_requests_total[1m])",
+        "legendFormat": "{{asset}} - {{status}}"
+      }]
+    },
+    {
+      "id": 2,
+      "title": "P99 Prediction Latency (ms)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{
+        "expr": "histogram_quantile(0.99, rate(alphaforge_predict_latency_seconds_bucket[5m])) * 1000",
+        "legendFormat": "P99 Latency {{asset}}"
+      }]
+    },
+    {
+      "id": 3,
+      "title": "Live Signal (1=LONG, 0=FLAT, -1=SHORT)",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 8},
+      "targets": [{
+        "expr": "alphaforge_latest_signal",
+        "legendFormat": "{{asset}}"
+      }]
+    },
+    {
+      "id": 4,
+      "title": "Prob(Up) by Asset",
+      "type": "gauge",
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 8},
+      "targets": [{
+        "expr": "alphaforge_prob_up",
+        "legendFormat": "{{asset}}"
+      }],
+      "fieldConfig": {"defaults": {"min": 0, "max": 1, "thresholds": {
+        "steps": [
+          {"color": "red", "value": 0},
+          {"color": "yellow", "value": 0.45},
+          {"color": "green", "value": 0.55}
+        ]
+      }}}
+    },
+    {
+      "id": 5,
+      "title": "Cache Hit Rate",
+      "type": "timeseries",
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 8},
+      "targets": [{
+        "expr": "rate(alphaforge_cache_hits_total[5m]) / (rate(alphaforge_cache_hits_total[5m]) + rate(alphaforge_cache_misses_total[5m]))",
+        "legendFormat": "Cache Hit Rate"
+      }]
+    },
+    {
+      "id": 6,
+      "title": "Error Rate",
+      "type": "timeseries",
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 14},
+      "targets": [{
+        "expr": "rate(alphaforge_predict_requests_total{status='error'}[5m]) / rate(alphaforge_predict_requests_total[5m])",
+        "legendFormat": "Error Rate"
+      }]
+    }
+  ],
+  "time": {"from": "now-6h", "to": "now"},
+  "refresh": "30s"
+}
