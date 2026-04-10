@@ -1,0 +1,23 @@
+artifact_path: file:///E:/AI practical Learning/ML Projects/alphaforge/alphaforge/mlruns/596183221104701464/models/m-cc9c9bc165a04e4d834905dfd717a039/artifacts
+flavors:
+  python_function:
+    config:
+      device: null
+    data: data
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.pytorch
+    pickle_module_name: mlflow.pytorch.pickle_module
+    python_version: 3.12.0
+  pytorch:
+    code: null
+    model_data: data
+    pytorch_version: 2.11.0+cu128
+mlflow_version: 3.11.1
+model_id: m-cc9c9bc165a04e4d834905dfd717a039
+model_size_bytes: 888729
+model_uuid: m-cc9c9bc165a04e4d834905dfd717a039
+prompts: null
+run_id: 078f3d030aa547e7826e6bf7f8b09d0a
+utc_time_created: '2026-04-10 13:12:15.127298'

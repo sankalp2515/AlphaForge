@@ -1,0 +1,14 @@
+artifact_uri: file:///E:/AI practical Learning/ML Projects/alphaforge/alphaforge/mlruns/596183221104701464/72a9c648499e42b19cb896881d33b8bf/artifacts
+end_time: 1775748457086
+entry_point_name: ''
+experiment_id: '596183221104701464'
+lifecycle_stage: active
+run_id: 72a9c648499e42b19cb896881d33b8bf
+run_name: lstm_20260409_192151
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1775742712848
+status: 3
+tags: []
+user_id: sanka

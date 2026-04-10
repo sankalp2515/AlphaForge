@@ -1,0 +1,10 @@
+artifact_location: file:///E:/AI practical Learning/ML Projects/alphaforge/alphaforge/mlruns/596183221104701464/models/m-ecf6f9ba3f104b35812b93e3c7c6d3be/artifacts
+creation_timestamp: 1775764360729
+experiment_id: '596183221104701464'
+last_updated_timestamp: 1775764360936
+model_id: m-ecf6f9ba3f104b35812b93e3c7c6d3be
+model_type: null
+name: model
+source_run_id: 35a2f711484a4fa4b60e6f9a805d1086
+status: 3
+status_message: null

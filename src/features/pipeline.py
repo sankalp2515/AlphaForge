@@ -1,17 +1,14 @@
 """
 AlphaForge Feature Pipeline
-Orchestrates feature computation for all assets and writes to TimescaleDB.
+Orchestrates feature computation for all assets and writes to SQLite.
 """
 from __future__ import annotations
 
 import pandas as pd
-from sqlalchemy import text
 
 from src.config import get_settings
-from src.data.storage import get_engine, load_ohlcv
+from src.data.storage import load_ohlcv, upsert_features
 from src.features.technical import (
-    FEATURE_COLUMNS,
-    LABEL_COLUMNS,
     compute_all_features,
     compute_cross_sectional_momentum_rank,
 )
@@ -27,20 +24,20 @@ def run_feature_pipeline(
     horizons: list[int] | None = None,
 ) -> dict[str, int]:
     """
-    Run feature engineering for all assets.
-    1. Load OHLCV from TimescaleDB
-    2. Compute single-asset features
-    3. Compute cross-sectional momentum rank (requires all assets)
-    4. Write features back to TimescaleDB
+    Full feature engineering pipeline:
+      1. Load OHLCV from DB
+      2. Compute single-asset features (RSI, MACD, momentum, vol, microstructure)
+      3. Compute cross-sectional momentum rank across all assets
+      4. Write features back to DB via upsert_features()
     Returns: {asset: rows_written}
     """
-    assets = assets or settings.all_assets
+    assets    = assets    or settings.all_assets
     timeframe = timeframe or settings.crypto_timeframe
-    horizons = horizons or settings.prediction_horizons
+    horizons  = horizons  or settings.prediction_horizons
 
     logger.info("starting_feature_pipeline", assets=assets, timeframe=timeframe)
 
-    # ── Step 1: Load all OHLCV ────────────────────────────────────────────────
+    # ── Step 1: Load OHLCV ────────────────────────────────────────────────────
     raw_data: dict[str, pd.DataFrame] = {}
     for asset in assets:
         try:
@@ -54,26 +51,29 @@ def run_feature_pipeline(
             logger.error("load_ohlcv_failed", asset=asset, error=str(e))
 
     if not raw_data:
-        raise RuntimeError("No OHLCV data available. Run ingestion first.")
+        raise RuntimeError("No OHLCV data found. Run 'setup ingest' first.")
 
-    # ── Step 2: Single-asset features ─────────────────────────────────────────
-    featured_data: dict[str, pd.DataFrame] = {}
+    # ── Step 2: Per-asset feature computation ─────────────────────────────────
+    featured: dict[str, pd.DataFrame] = {}
     for asset, df in raw_data.items():
         try:
-            feat_df = compute_all_features(df, horizons=horizons)
-            featured_data[asset] = feat_df
+            featured[asset] = compute_all_features(df, horizons=horizons)
         except Exception as e:
             logger.error("feature_computation_failed", asset=asset, error=str(e))
 
-    # ── Step 3: Cross-sectional momentum rank ─────────────────────────────────
-    # This requires all assets to be computed simultaneously
-    featured_data = compute_cross_sectional_momentum_rank(featured_data, horizon=20)
+    if not featured:
+        raise RuntimeError("Feature computation failed for all assets.")
 
-    # ── Step 4: Write to TimescaleDB ──────────────────────────────────────────
+    # ── Step 3: Cross-sectional momentum rank ─────────────────────────────────
+    featured = compute_cross_sectional_momentum_rank(featured, horizon=20)
+
+    # ── Step 4: Write to DB ───────────────────────────────────────────────────
     results: dict[str, int] = {}
-    for asset, df in featured_data.items():
+    for asset, df in featured.items():
         try:
-            n = _write_features(df, asset=asset, timeframe=timeframe)
+            # upsert_features handles: reset_index, astype(str) on time,
+            # NaN→None conversion, and INSERT OR REPLACE — all SQLite safe.
+            n = upsert_features(df, asset=asset, timeframe=timeframe)
             results[asset] = n
         except Exception as e:
             logger.error("write_features_failed", asset=asset, error=str(e))
@@ -83,58 +83,14 @@ def run_feature_pipeline(
     return results
 
 
-def _write_features(df: pd.DataFrame, asset: str, timeframe: str) -> int:
-    """Upsert feature rows into TimescaleDB."""
-    df = df.reset_index()
-    df["asset"] = asset
-    df["timeframe"] = timeframe
-
-    # Select only columns that exist in our schema
-    all_cols = ["time", "asset", "timeframe"] + FEATURE_COLUMNS + LABEL_COLUMNS
-    existing_cols = [c for c in all_cols if c in df.columns]
-    df = df[existing_cols]
-
-    # Build upsert SQL dynamically based on available columns
-    feature_cols = [c for c in existing_cols if c not in ("time", "asset", "timeframe")]
-    col_list = ", ".join(existing_cols)
-    placeholder_list = ", ".join(f":{c}" for c in existing_cols)
-    update_list = ", ".join(f"{c} = EXCLUDED.{c}" for c in feature_cols)
-
-    upsert_sql = text(f"""
-        INSERT INTO features ({col_list})
-        VALUES ({placeholder_list})
-        ON CONFLICT (time, asset, timeframe) DO UPDATE SET
-            {update_list}
-    """)
-
-    rows = df.to_dict("records")
-    with get_engine().begin() as conn:
-        conn.execute(upsert_sql, rows)
-
-    logger.info("wrote_features", asset=asset, rows=len(rows))
-    return len(rows)
-
-
-# ─── CLI ─────────────────────────────────────────────────────────────────────
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import click
+    from src.logger import setup_logging
+    setup_logging()
 
-    @click.command()
-    @click.option("--assets", default=None, help="Comma-separated assets")
-    @click.option("--timeframe", default=None)
-    @click.option("--run-all", is_flag=True, default=False)
-    def main(assets: str | None, timeframe: str | None, run_all: bool) -> None:
-        from src.logger import setup_logging
-        setup_logging()
-
-        asset_list = assets.split(",") if assets else None
-        results = run_feature_pipeline(
-            assets=asset_list,
-            timeframe=timeframe,
-        )
-        for asset, n in results.items():
-            status = "✅" if n > 0 else "❌"
-            print(f"{status} {asset}: {n} feature rows")
-
-    main()
+    results = run_feature_pipeline()
+    print()
+    for asset, n in results.items():
+        status = "✅" if n > 0 else "❌"
+        print(f"  {status}  {asset}: {n} feature rows")

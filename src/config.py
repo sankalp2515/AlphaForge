@@ -1,78 +1,97 @@
 """
 AlphaForge Configuration
-Centralized settings using pydantic-settings.
-All values can be overridden via environment variables or .env file.
+Local-first defaults: SQLite DB, local MLflow, no Redis required.
+Override any value via .env file or environment variables.
 """
+from __future__ import annotations
+
+import os
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Project root (where .env lives)
+ROOT = Path(__file__).parent.parent
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(ROOT / ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
-    # ─── Environment ───
+    # ── Environment ────────────────────────────────────────────────────────────
     environment: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
 
-    # ─── Database ───
+    # ── Database ───────────────────────────────────────────────────────────────
+    # Default: SQLite in data/ folder — zero install, works everywhere
     db_url: str = Field(
-        default="postgresql://alphaforge:alphaforge@localhost:5433/alphaforge",
+        default="sqlite:///data/alphaforge.db",
         alias="ALPHAFORGE_DB_URL",
     )
-    db_pool_size: int = 10
-    db_max_overflow: int = 20
 
-    # ─── Redis ───
-    redis_url: str = "redis://localhost:6379/0"
-    signal_cache_ttl_seconds: int = 60  # 1-minute TTL on signals
+    # ── Feature Store ──────────────────────────────────────────────────────────
+    # Parquet files stored locally — no Feast, no server
+    feature_store_path: str = Field(
+        default="data/features",
+        alias="FEATURE_STORE_PATH",
+    )
 
-    # ─── MLflow ───
-    mlflow_tracking_uri: str = "http://localhost:5000"
+    # ── MLflow ────────────────────────────────────────────────────────────────
+    # "mlruns" = local folder. No server needed.
+    # View UI with: python -m mlflow ui  (then open http://localhost:5000)
+    mlflow_tracking_uri: str = Field(
+        default="mlruns",
+        alias="MLFLOW_TRACKING_URI",
+    )
     mlflow_experiment_name: str = "alphaforge-v1"
     mlflow_model_name: str = "alphaforge-signal-engine"
 
-    # ─── Assets ───
+    # ── Redis ─────────────────────────────────────────────────────────────────
+    # Optional — if empty, API uses in-memory dict cache instead
+    redis_url: str = Field(default="", alias="REDIS_URL")
+    signal_cache_ttl_seconds: int = 60
+
+    # ── Assets ────────────────────────────────────────────────────────────────
     crypto_assets: list[str] = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
     equity_assets: list[str] = ["SPY", "QQQ"]
 
-    # ─── Data ───
-    crypto_timeframe: str = "1h"          # Binance OHLCV timeframe
-    equity_timeframe: str = "1d"          # Yahoo Finance daily
-    lookback_days: int = 730              # 2 years of history
-    feature_window: int = 60             # 60 bars for sequence models
+    # ── Data ──────────────────────────────────────────────────────────────────
+    crypto_timeframe: str = "1h"
+    equity_timeframe: str = "1d"
+    lookback_days: int = 365       # 1 year default for local dev (faster)
+    feature_window: int = 60
 
-    # ─── Model ───
-    prediction_horizons: list[int] = [1, 5, 20]  # bars ahead
-    batch_size: int = 64
-    max_epochs: int = 100
+    # ── Model ─────────────────────────────────────────────────────────────────
+    prediction_horizons: list[int] = [1, 5, 20]
+    batch_size: int = 32
+    max_epochs: int = 50
     learning_rate: float = 1e-3
     early_stopping_patience: int = 10
 
-    # ─── Evaluation Gates (model promotion thresholds) ───
+    # ── Evaluation Gates ──────────────────────────────────────────────────────
     min_auc_roc: float = 0.55
     min_sharpe_ratio: float = 0.8
     max_drawdown_pct: float = 0.20
     min_information_coefficient: float = 0.03
 
-    # ─── Drift Detection ───
-    psi_threshold: float = 0.2   # Population Stability Index
+    # ── Drift ─────────────────────────────────────────────────────────────────
+    psi_threshold: float = 0.2
     drift_window_days: int = 30
 
-    # ─── API ───
+    # ── API ───────────────────────────────────────────────────────────────────
     api_host: str = "0.0.0.0"
     api_port: int = 8000
-    api_workers: int = 2
 
-    # ─── Binance ───
-    binance_api_key: str = ""       # optional for public data
-    binance_secret: str = ""        # optional for public data
+    # ── Binance ───────────────────────────────────────────────────────────────
+    binance_api_key: str = ""
+    binance_secret: str = ""
 
     @property
     def all_assets(self) -> list[str]:
@@ -82,8 +101,23 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.environment == "production"
 
+    @property
+    def use_redis(self) -> bool:
+        return bool(self.redis_url)
+
+    @property
+    def feature_store_dir(self) -> Path:
+        p = ROOT / self.feature_store_path
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @property
+    def data_dir(self) -> Path:
+        p = ROOT / "data"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
 
 @lru_cache
 def get_settings() -> Settings:
-    """Cached settings instance — call this everywhere."""
     return Settings()

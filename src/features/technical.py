@@ -1,6 +1,11 @@
 """
 AlphaForge Feature Engineering
-Computes alpha signals from raw OHLCV data:
+Computes alpha signals from raw OHLCV data using the `ta` library.
+
+Changed from pandas-ta (pre-release, PyPI conflicts) to `ta`
+(stable, pure-Python, zero dependency conflicts).
+
+Signals computed:
   - Technical indicators (RSI, MACD, Bollinger, ATR, OBV, ADX)
   - Momentum features (multi-horizon, cross-sectional rank)
   - Volatility features (realized vol, vol ratio)
@@ -11,7 +16,11 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
+import ta
+import ta.momentum
+import ta.trend
+import ta.volatility
+import ta.volume
 
 from src.logger import get_logger
 
@@ -22,66 +31,66 @@ logger = get_logger(__name__)
 
 def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute standard technical analysis indicators.
-    Input: DataFrame with OHLCV columns and DatetimeIndex.
-    Returns: DataFrame with new feature columns.
+    Compute standard technical analysis indicators using the `ta` library.
+    Input: DataFrame with open/high/low/close/volume columns and DatetimeIndex.
     """
     out = df.copy()
+    close = out["close"]
+    high  = out["high"]
+    low   = out["low"]
+    vol   = out["volume"]
 
     # RSI (14-period)
-    out["rsi_14"] = ta.rsi(out["close"], length=14)
+    out["rsi_14"] = ta.momentum.RSIIndicator(close=close, window=14).rsi()
 
     # MACD (12, 26, 9)
-    macd = ta.macd(out["close"], fast=12, slow=26, signal=9)
-    if macd is not None and not macd.empty:
-        out["macd"] = macd.iloc[:, 0]          # MACD line
-        out["macd_signal"] = macd.iloc[:, 2]   # Signal line
-        out["macd_hist"] = macd.iloc[:, 1]     # Histogram
+    macd_ind = ta.trend.MACD(close=close, window_fast=12, window_slow=26, window_sign=9)
+    out["macd"]        = macd_ind.macd()
+    out["macd_signal"] = macd_ind.macd_signal()
+    out["macd_hist"]   = macd_ind.macd_diff()
 
     # Bollinger Bands (20, 2)
-    bb = ta.bbands(out["close"], length=20, std=2)
-    if bb is not None and not bb.empty:
-        out["bb_upper"] = bb.iloc[:, 2]  # Upper band
-        out["bb_lower"] = bb.iloc[:, 0]  # Lower band
-        # %B: position within bands (0=lower, 1=upper)
-        band_width = out["bb_upper"] - out["bb_lower"]
-        out["bb_pct"] = (out["close"] - out["bb_lower"]) / band_width.replace(0, np.nan)
+    bb = ta.volatility.BollingerBands(close=close, window=20, window_dev=2)
+    out["bb_upper"] = bb.bollinger_hband()
+    out["bb_lower"] = bb.bollinger_lband()
+    out["bb_pct"]   = bb.bollinger_pband()   # %B: 0=lower, 1=upper
 
     # ATR (14-period Average True Range)
-    out["atr_14"] = ta.atr(out["high"], out["low"], out["close"], length=14)
+    out["atr_14"] = ta.volatility.AverageTrueRange(
+        high=high, low=low, close=close, window=14
+    ).average_true_range()
 
     # OBV (On-Balance Volume)
-    out["obv"] = ta.obv(out["close"], out["volume"])
+    out["obv"] = ta.volume.OnBalanceVolumeIndicator(
+        close=close, volume=vol
+    ).on_balance_volume()
 
     # ADX (Average Directional Index, 14-period)
-    adx = ta.adx(out["high"], out["low"], out["close"], length=14)
-    if adx is not None and not adx.empty:
-        out["adx_14"] = adx.iloc[:, 0]  # ADX line
+    out["adx_14"] = ta.trend.ADXIndicator(
+        high=high, low=low, close=close, window=14
+    ).adx()
 
-    logger.debug("computed_technical_features", n_features=6)
+    logger.debug("computed_technical_features", n_features=10)
     return out
 
 
 # ─── Momentum Features ────────────────────────────────────────────────────────
 
 def compute_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute multi-horizon momentum (rate of change) features.
-    These are among the most powerful alpha signals in academic research.
-    """
+    """Multi-horizon momentum and mean-reversion features."""
     out = df.copy()
 
-    # Raw return over N bars
     for n in [1, 5, 20]:
         out[f"mom_{n}"] = out["close"].pct_change(n)
 
-    # Price relative to rolling max/min (range position)
+    # Price position within 20-bar range (0=bottom, 1=top)
+    low_20  = out["low"].rolling(20).min()
+    high_20 = out["high"].rolling(20).max()
     out["price_range_pos_20"] = (
-        (out["close"] - out["low"].rolling(20).min())
-        / (out["high"].rolling(20).max() - out["low"].rolling(20).min()).replace(0, np.nan)
+        (out["close"] - low_20) / (high_20 - low_20).replace(0, np.nan)
     )
 
-    # Distance from 20-bar SMA (mean reversion signal)
+    # Distance from 20-bar SMA (mean-reversion signal)
     sma_20 = out["close"].rolling(20).mean()
     out["dist_from_sma_20"] = (out["close"] - sma_20) / sma_20.replace(0, np.nan)
 
@@ -94,28 +103,20 @@ def compute_cross_sectional_momentum_rank(
     horizon: int = 20,
 ) -> dict[str, pd.DataFrame]:
     """
-    Compute cross-sectional momentum rank.
-    Rank each asset's N-bar return vs. all other assets at each timestamp.
-    Rank 1.0 = top performer, 0.0 = worst performer.
+    Rank each asset's N-bar return vs. all assets at each timestamp.
+    Rank 1.0 = best performer, 0.0 = worst.
     """
-    # Align all assets on time index
     returns = pd.DataFrame({
         asset: df[f"mom_{horizon}"]
         for asset, df in dfs.items()
         if f"mom_{horizon}" in df.columns
     })
-
-    # Rank within each row (cross-sectional at each timestamp)
     ranked = returns.rank(axis=1, pct=True)
 
-    # Write back to individual DataFrames
     result = {}
     for asset, df in dfs.items():
         out = df.copy()
-        if asset in ranked.columns:
-            out["mom_rank"] = ranked[asset]
-        else:
-            out["mom_rank"] = np.nan
+        out["mom_rank"] = ranked[asset] if asset in ranked.columns else np.nan
         result[asset] = out
 
     logger.debug("computed_cross_sectional_rank", assets=list(dfs.keys()))
@@ -125,23 +126,17 @@ def compute_cross_sectional_momentum_rank(
 # ─── Volatility Features ──────────────────────────────────────────────────────
 
 def compute_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Realized volatility features.
-    Short/long vol ratio captures vol regime changes.
-    """
+    """Realized volatility and vol-regime features."""
     out = df.copy()
-
     log_ret = np.log(out["close"] / out["close"].shift(1))
 
-    out["realized_vol_5"] = log_ret.rolling(5).std() * np.sqrt(252)
+    out["realized_vol_5"]  = log_ret.rolling(5).std()  * np.sqrt(252)
     out["realized_vol_20"] = log_ret.rolling(20).std() * np.sqrt(252)
-
-    # Vol ratio: short/long (> 1 = rising vol, < 1 = falling vol)
     out["vol_ratio"] = (
         out["realized_vol_5"] / out["realized_vol_20"].replace(0, np.nan)
     )
 
-    # Autocorrelation of returns (mean-reversion vs momentum regime)
+    # Return autocorrelation: >0 = momentum regime, <0 = mean-reversion regime
     out["ret_autocorr_5"] = log_ret.rolling(20).apply(
         lambda x: x.autocorr(lag=1) if len(x) >= 5 else np.nan,
         raw=False,
@@ -155,32 +150,28 @@ def compute_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def compute_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Market microstructure features — proxies for order flow and liquidity.
-    These require only OHLCV data (no L2 book needed).
+    Microstructure proxies from OHLCV data.
+    No Level-2 order book required.
     """
     out = df.copy()
-
-    # Order Flow Imbalance proxy (Corwin & Schultz high-low spread estimator)
-    # Positive OFI → buying pressure, Negative OFI → selling pressure
     hi = out["high"]
     lo = out["low"]
     cl = out["close"]
     op = out["open"]
 
-    # Simple OFI proxy: (close - open) / (high - low)
+    # Order Flow Imbalance proxy: (close-open)/(high-low)
     hl_range = (hi - lo).replace(0, np.nan)
-    out["ofi"] = (cl - op) / hl_range
-
-    # Rolling OFI (smoothed)
+    out["ofi"]     = (cl - op) / hl_range
     out["ofi_ma5"] = out["ofi"].rolling(5).mean()
 
-    # Amihud Illiquidity Ratio: |return| / volume
-    # Higher = more illiquid (large price impact per unit volume)
-    abs_ret = out["close"].pct_change().abs()
-    dollar_vol = out["close"] * out["volume"]
-    out["amihud"] = (abs_ret / dollar_vol.replace(0, np.nan)).rolling(20).mean() * 1e6
+    # Amihud Illiquidity: |return| / dollar_volume (scaled)
+    abs_ret    = cl.pct_change().abs()
+    dollar_vol = cl * out["volume"]
+    out["amihud"] = (
+        (abs_ret / dollar_vol.replace(0, np.nan)).rolling(20).mean() * 1e6
+    )
 
-    # Volume surprise: current volume vs. 20-bar average
+    # Volume surprise: current vs 20-bar average
     avg_vol = out["volume"].rolling(20).mean()
     out["volume_surprise"] = out["volume"] / avg_vol.replace(0, np.nan)
 
@@ -194,20 +185,13 @@ def compute_labels(
     df: pd.DataFrame,
     horizons: list[int] | None = None,
 ) -> pd.DataFrame:
-    """
-    Compute forward return labels for supervised learning.
-    Binary: 1 = price went up over horizon, 0 = price went down.
-    Note: forward returns are shifted backward — no lookahead in training
-    if we use purged K-Fold CV.
-    """
+    """Binary forward-return labels for supervised learning."""
     horizons = horizons or [1, 5, 20]
     out = df.copy()
-
     for h in horizons:
         fwd_ret = out["close"].pct_change(h).shift(-h)
         out[f"fwd_ret_{h}"] = fwd_ret
-        out[f"label_{h}"] = (fwd_ret > 0).astype(float)
-
+        out[f"label_{h}"]   = (fwd_ret > 0).astype(float)
     logger.debug("computed_labels", horizons=horizons)
     return out
 
@@ -218,28 +202,21 @@ def compute_all_features(
     df: pd.DataFrame,
     horizons: list[int] | None = None,
 ) -> pd.DataFrame:
-    """
-    Run the full single-asset feature engineering pipeline.
-    Order matters: some features depend on others.
-    """
+    """Run the full single-asset feature pipeline."""
     df = compute_technical_features(df)
     df = compute_momentum_features(df)
     df = compute_volatility_features(df)
     df = compute_microstructure_features(df)
     df = compute_labels(df, horizons=horizons)
 
-    # Drop rows with NaN features (initial warmup period)
     n_before = len(df)
     df = df.dropna(subset=["rsi_14", "macd", "mom_20", "realized_vol_20"])
-    n_after = len(df)
-
     logger.info(
         "feature_pipeline_complete",
         rows_before=n_before,
-        rows_after=n_after,
-        warmup_rows_dropped=n_before - n_after,
+        rows_after=len(df),
+        warmup_dropped=n_before - len(df),
     )
-
     return df
 
 
@@ -259,5 +236,7 @@ FEATURE_COLUMNS = [
     "ofi", "ofi_ma5", "amihud", "volume_surprise",
 ]
 
-LABEL_COLUMNS = ["fwd_ret_1", "fwd_ret_5", "fwd_ret_20",
-                 "label_1", "label_5", "label_20"]
+LABEL_COLUMNS = [
+    "fwd_ret_1", "fwd_ret_5", "fwd_ret_20",
+    "label_1", "label_5", "label_20",
+]

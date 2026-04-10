@@ -1,0 +1,16 @@
+creation_timestamp: 1775748457030
+current_stage: None
+deployment_job_state: null
+description: null
+last_updated_timestamp: 1775748457030
+model_id: m-634857ac5ca6446b99b3db08552b3445
+name: alphaforge-signal-engine-lstm
+run_id: 72a9c648499e42b19cb896881d33b8bf
+run_link: null
+source: models:/m-634857ac5ca6446b99b3db08552b3445
+status: READY
+status_message: null
+storage_location: file:///E:/AI practical Learning/ML Projects/alphaforge/alphaforge/mlruns/596183221104701464/models/m-634857ac5ca6446b99b3db08552b3445/artifacts
+user_id: null
+version: 1
+workspace: default

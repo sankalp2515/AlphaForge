@@ -1,14 +1,13 @@
 """
-AlphaForge — Signal Cache
-Redis-backed cache for trading signals.
-TTL-based expiry ensures signals are refreshed on schedule.
+AlphaForge Signal Cache
+Uses Redis when REDIS_URL is configured, otherwise falls back to
+an in-memory dict — no Redis install needed for local dev.
 """
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Optional
-
-import redis
 
 from src.config import get_settings
 from src.logger import get_logger
@@ -17,59 +16,112 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 
-class SignalCache:
-    """Redis-backed cache for trading signals with TTL."""
+# ── In-Memory Cache ───────────────────────────────────────────────────────────
 
-    def __init__(self, redis_url: str) -> None:
-        self.client = redis.from_url(redis_url, decode_responses=True)
-        self.ttl = settings.signal_cache_ttl_seconds
+class InMemoryCache:
+    """TTL-based in-memory cache. Used when Redis is not configured."""
 
-    def _key(self, asset: str, horizon: int) -> str:
-        clean = asset.replace("/", "_")
-        return f"alphaforge:signal:{clean}:{horizon}"
+    def __init__(self, ttl: int = 60) -> None:
+        self._store: dict[str, tuple[Any, float]] = {}
+        self.ttl = ttl
 
-    def get(self, asset: str, horizon: int) -> Optional[dict]:
+    def get(self, key: str) -> Optional[str]:
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        value, expires_at = entry
+        if time.time() > expires_at:
+            del self._store[key]
+            return None
+        return value
+
+    def set(self, key: str, value: str, ttl: Optional[int] = None) -> bool:
+        self._store[key] = (value, time.time() + (ttl or self.ttl))
+        return True
+
+    def delete(self, key: str) -> None:
+        self._store.pop(key, None)
+
+    def ping(self) -> bool:
+        return True
+
+
+# ── Redis Cache ───────────────────────────────────────────────────────────────
+
+class RedisCache:
+    """Redis-backed cache. Only instantiated when REDIS_URL is set."""
+
+    def __init__(self, redis_url: str, ttl: int = 60) -> None:
+        import redis as redis_lib
+        self._client = redis_lib.from_url(redis_url, decode_responses=True)
+        self.ttl = ttl
+
+    def get(self, key: str) -> Optional[str]:
         try:
-            val = self.client.get(self._key(asset, horizon))
-            return json.loads(val) if val else None
-        except Exception as e:
-            logger.warning("cache_get_failed", asset=asset, error=str(e))
+            return self._client.get(key)
+        except Exception:
             return None
 
-    def set(self, asset: str, horizon: int, data: dict) -> bool:
+    def set(self, key: str, value: str, ttl: Optional[int] = None) -> bool:
         try:
-            self.client.setex(
-                self._key(asset, horizon),
-                self.ttl,
-                json.dumps(data, default=str),
-            )
+            self._client.setex(key, ttl or self.ttl, value)
             return True
-        except Exception as e:
-            logger.warning("cache_set_failed", asset=asset, error=str(e))
+        except Exception:
             return False
 
-    def delete(self, asset: str, horizon: int) -> None:
+    def delete(self, key: str) -> None:
         try:
-            self.client.delete(self._key(asset, horizon))
+            self._client.delete(key)
         except Exception:
             pass
 
-    def flush_all_signals(self) -> int:
-        """Clear all cached signals (call before model version change)."""
+    def ping(self) -> bool:
         try:
-            keys = self.client.keys("alphaforge:signal:*")
-            if keys:
-                return self.client.delete(*keys)
-            return 0
-        except Exception as e:
-            logger.warning("cache_flush_failed", error=str(e))
-            return 0
-
-    def is_healthy(self) -> bool:
-        try:
-            return self.client.ping()
+            return bool(self._client.ping())
         except Exception:
             return False
 
+
+# ── Unified Signal Cache ──────────────────────────────────────────────────────
+
+class SignalCache:
+    """
+    Public cache interface.
+    Auto-selects Redis (if REDIS_URL set) or in-memory dict (local dev).
+    Call with no arguments: cache = SignalCache()
+    """
+
+    def __init__(self) -> None:          # ← no arguments
+        self.ttl = settings.signal_cache_ttl_seconds
+
+        if settings.use_redis:
+            try:
+                backend = RedisCache(settings.redis_url, ttl=self.ttl)
+                backend.ping()
+                self._backend: InMemoryCache | RedisCache = backend
+                logger.info("cache_backend", backend="redis")
+            except Exception as e:
+                logger.warning("redis_unavailable", error=str(e), fallback="in_memory")
+                self._backend = InMemoryCache(ttl=self.ttl)
+        else:
+            self._backend = InMemoryCache(ttl=self.ttl)
+            logger.info("cache_backend", backend="in_memory")
+
+    def _key(self, asset: str, horizon: int) -> str:
+        return f"alphaforge:signal:{asset.replace('/', '_')}:{horizon}"
+
+    def get(self, asset: str, horizon: int) -> Optional[dict]:
+        raw = self._backend.get(self._key(asset, horizon))
+        return json.loads(raw) if raw else None
+
+    def set(self, asset: str, horizon: int, data: dict) -> bool:
+        return self._backend.set(
+            self._key(asset, horizon),
+            json.dumps(data, default=str),
+        )
+
+    def is_healthy(self) -> bool:
+        return self._backend.ping()
+
     def close(self) -> None:
-        self.client.close()
+        pass
