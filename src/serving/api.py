@@ -117,12 +117,12 @@ async def lifespan(app: FastAPI):
     """Load model and initialize connections on startup."""
     logger.info("api_starting_up")
 
-    # Initialize Redis cache
+    # Initialize cache (auto-selects Redis or in-memory based on settings)
     try:
-        state.cache = SignalCache(settings.redis_url)
-        logger.info("redis_connected")
+        state.cache = SignalCache()
+        logger.info("cache_initialized", healthy=state.cache.is_healthy())
     except Exception as e:
-        logger.warning("redis_unavailable", error=str(e))
+        logger.warning("cache_init_failed", error=str(e))
         state.cache = None
 
     # Load production model from MLflow registry
@@ -139,7 +139,7 @@ async def lifespan(app: FastAPI):
             f"{settings.mlflow_model_name}-lstm", stages=["Production"]
         )
         if versions:
-            state.model_version = versions[0].version
+            state.model_version = str(versions[0].version)  # MLflow returns int, cast to str
             MODEL_VERSION_GAUGE.labels(
                 model_name=f"{settings.mlflow_model_name}-lstm",
                 version=state.model_version,
